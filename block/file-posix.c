@@ -79,6 +79,9 @@
 #define FS_NOCOW_FL                     0x00800000 /* Do not cow file */
 #endif
 #endif
+#ifdef CONFIG_FCNTL_PUNCH_HOLE
+#include <fcntl.h>
+#endif
 #if defined(CONFIG_FALLOCATE_PUNCH_HOLE) || defined(CONFIG_FALLOCATE_ZERO_RANGE)
 #include <linux/falloc.h>
 #endif
@@ -157,6 +160,9 @@ typedef struct BDRVRawState {
     bool is_xfs:1;
 #endif
     bool has_discard:1;
+#ifdef CONFIG_FCNTL_PUNCH_HOLE
+    bool has_fcntl_punch_hole:1;
+#endif
     bool has_write_zeroes:1;
     bool discard_zeroes:1;
     bool use_linux_aio:1;
@@ -717,6 +723,9 @@ static int raw_open_common(BlockDriverState *bs, QDict *options,
 #endif /* !defined(CONFIG_LINUX_IO_URING) */
 
     s->has_discard = true;
+#ifdef CONFIG_FCNTL_PUNCH_HOLE
+    s->has_fcntl_punch_hole = true;
+#endif
     s->has_write_zeroes = true;
     if ((bs->open_flags & BDRV_O_NOCACHE) != 0 && !dio_byte_aligned(s->fd)) {
         s->needs_alignment = true;
@@ -1612,6 +1621,19 @@ static int do_fallocate(int fd, int mode, off_t offset, off_t len)
 }
 #endif
 
+#ifdef CONFIG_FCNTL_PUNCH_HOLE
+static int do_fcntl_punch_hole(int fd, off_t offset, off_t len) {
+    fpunchhole_t fph;
+    memset(&fph, 0, sizeof(fph));
+    fph.fp_offset = offset;
+    fph.fp_length = len;
+    if (fcntl(fd, F_PUNCHHOLE, fph) != -1) {
+        return 0;
+    }
+    return translate_err(-errno);
+}
+#endif
+
 static ssize_t handle_aiocb_write_zeroes_block(RawPosixAIOData *aiocb)
 {
     int ret = -ENOTSUP;
@@ -1646,7 +1668,7 @@ static ssize_t handle_aiocb_write_zeroes_block(RawPosixAIOData *aiocb)
 static int handle_aiocb_write_zeroes(void *opaque)
 {
     RawPosixAIOData *aiocb = opaque;
-#ifdef CONFIG_FALLOCATE
+#if defined(CONFIG_FALLOCATE) || defined(CONFIG_FCNTL_PUNCH_HOLE)
     BDRVRawState *s = aiocb->bs->opaque;
     int64_t len;
 #endif
@@ -1703,6 +1725,17 @@ static int handle_aiocb_write_zeroes(void *opaque)
     }
 #endif
 
+#ifdef CONFIG_FCNTL_PUNCH_HOLE
+    if (s->has_fcntl_punch_hole) {
+        int ret = do_fcntl_punch_hole(s->fd,
+                                      aiocb->aio_offset, aiocb->aio_nbytes);
+        if (ret != -ENOTSUP) {
+            return ret;
+        }
+        s->has_fcntl_punch_hole = false;
+    }
+#endif
+
 #ifdef CONFIG_FALLOCATE
     /* Last resort: we are trying to extend the file with zeroed data. This
      * can be done via fallocate(fd, 0) */
@@ -1736,6 +1769,22 @@ static int handle_aiocb_write_zeroes_unmap(void *opaque)
         break;
     default:
         return ret;
+    }
+#endif
+
+#ifdef CONFIG_FCNTL_PUNCH_HOLE
+    if (s->has_fcntl_punch_hole) {
+        int ret = do_fcntl_punch_hole(s->fd,
+                                      aiocb->aio_offset, aiocb->aio_nbytes);
+        switch (ret) {
+        case -ENOTSUP:
+            s->has_fcntl_punch_hole = false;
+        case -EINVAL:
+        case -EBUSY:
+            break;
+        default:
+            return ret;
+        }
     }
 #endif
 
@@ -1817,6 +1866,11 @@ static int handle_aiocb_discard(void *opaque)
 #ifdef CONFIG_FALLOCATE_PUNCH_HOLE
         ret = do_fallocate(s->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
                            aiocb->aio_offset, aiocb->aio_nbytes);
+#endif
+#ifdef CONFIG_FCNTL_PUNCH_HOLE
+    if (ret != 0 && s->has_fcntl_punch_hole) {
+        ret = do_fcntl_punch_hole(s->fd, aiocb->aio_offset, aiocb->aio_nbytes);
+    }
 #endif
     }
 

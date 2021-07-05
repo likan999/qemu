@@ -3685,6 +3685,22 @@ if compile_prog "" "" ; then
   fallocate_punch_hole=yes
 fi
 
+# check for fcntl hole punching
+fcntl_punch_hole=no
+cat > $TMPC << EOF
+#include <fcntl.h>
+
+int main(void)
+{
+    fpunchhole_t fp;
+    fcntl(0, F_PUNCHHOLE, fp);
+    return 0;
+}
+EOF
+if compile_prog "" "" ; then
+  fcntl_punch_hole=yes
+fi
+
 # check that fallocate supports range zeroing inside the file
 fallocate_zero_range=no
 cat > $TMPC << EOF
@@ -5395,6 +5411,9 @@ if test "$fallocate" = "yes" ; then
 fi
 if test "$fallocate_punch_hole" = "yes" ; then
   echo "CONFIG_FALLOCATE_PUNCH_HOLE=y" >> $config_host_mak
+fi
+if test "$fcntl_punch_hole" = "yes" ; then
+  echo "CONFIG_FCNTL_PUNCH_HOLE=y" >> $config_host_mak
 fi
 if test "$fallocate_zero_range" = "yes" ; then
   echo "CONFIG_FALLOCATE_ZERO_RANGE=y" >> $config_host_mak
